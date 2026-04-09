@@ -8,7 +8,7 @@ description: >
   Triggers: 'update this prompt', 'optimize this skill', 'add a template to skill X',
   'edit the agent config', 'do this small task', 'fix this file', 'run this errand'.
 argument-hint: "Describe the task precisely — what file to touch, what change to make, and why."
-model: Gemini 3 Flash (Preview) (copilot)
+model: GPT-5.4 (copilot)
 user-invocable: false
 ---
 

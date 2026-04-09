@@ -2,11 +2,15 @@
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+
+load_dotenv()
 
 from crawlers.base import BaseCrawler
 from helpers.rate_limiter import RateLimiter
@@ -178,6 +182,19 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
             )
             page = await context.new_page()
 
+            # Inject session cookies before navigating so X doesn't redirect to login
+            auth_token = os.getenv("X_AUTH_TOKEN")
+            ct0 = os.getenv("X_CT0")
+            if auth_token and ct0:
+                await context.add_cookies([
+                    {"name": "auth_token", "value": auth_token, "domain": ".x.com", "path": "/"},
+                    {"name": "ct0", "value": ct0, "domain": ".x.com", "path": "/"},
+                ])
+            else:
+                logger.warning(
+                    "X_AUTH_TOKEN and X_CT0 not set in .env — crawl may fail due to login wall"
+                )
+
             logger.info("Navigating to %s", url)
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -196,8 +213,9 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
             if "login" in current_url or login_form is not None:
                 await browser.close()
                 raise LoginWallError(
-                    f"X requires login to view @{account}. "
-                    "Try setting X_COOKIES in your .env file and loading them into the browser context."
+                    f"X requires authentication to view @{account}. "
+                    "Set X_AUTH_TOKEN and X_CT0 in .env "
+                    "(export from browser DevTools → Application → Cookies → x.com)"
                 )
 
             # Check for suspension or empty profile

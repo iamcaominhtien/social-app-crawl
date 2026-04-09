@@ -8,10 +8,12 @@ applyTo: "**"
 
 ## When Working on a Kanban Ticket
 
-After each meaningful step, add a work log entry to the ticket using the Kanban MCP `add_work_log` tool via the `kanbander` agent — **not** by appending to the ticket description.
+After each meaningful step, add a work log entry to the ticket using the Kanban MCP `add_work_log` tool directly if available, or via the `kanbander` agent — **not** by appending to the ticket description.
 
-- Use ISO datetime format (date + 24h time, local timezone), identify the agent by name, 1–2 sentences per entry
-- Delegate via: `Use the kanbander agent to add a work log to ticket #N: <what was done and why>`
+- Timestamps are auto-added by the tool — do not include them manually
+- Identify the agent by name, 1–2 sentences per entry describing what was done and why
+- Sub-agents (developer, qc, code-change-reviewer, etc.) are expected to self-log after completing their work when the Kanban tool is available to them
+- If the Kanban tool is not available, delegate via: `Use the kanbander agent to add a work log to ticket #N: <what was done and why>`
 
 ## When NOT on a Kanban Ticket
 

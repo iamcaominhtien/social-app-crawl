@@ -2,7 +2,7 @@
 name: code-simplifier
 description: Analyze code for complexity and simplification opportunities — nested logic, duplication, wrong architectural layer, or unclear naming.
 argument-hint: Paste the code or file path you want simplified.
-tools: [vscode/runCommand, execute, read, agent, edit, search, web, todo]
+tools: [vscode/runCommand, execute, read, agent, edit, search, web, kanban/add_work_log, kanban/get_ticket, todo]
 model: Gemini 3 Flash (Preview) (copilot)
 ---
 

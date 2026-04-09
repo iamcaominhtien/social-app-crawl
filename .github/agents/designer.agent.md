@@ -2,7 +2,7 @@
 name: designer
 description: Specialist design agent for creating hand-drawn Excalidraw diagrams, wireframes, flowcharts, and Remotion video animations. Use for: architecture diagrams, UI wireframes, explainer flows, page mockups, animated videos, data visualizations in video, motion graphics. Triggers: 'create a diagram', 'draw a wireframe', 'make an animation', 'design a flow', 'create a video', 'visualize this', 'sketch this out'.
 argument-hint: Describe what to design — e.g. "draw an architecture diagram for the auth flow" or "create a Remotion animation showing the onboarding steps"
-tools: [vscode, execute, read, agent, edit, search, web, browser, 'io.github.chromedevtools/chrome-devtools-mcp/*', todo]
+tools: [vscode, execute, read, agent, edit, search, web, browser, 'io.github.chromedevtools/chrome-devtools-mcp/*', kanban/add_work_log, kanban/get_ticket, todo]
 model: Claude Sonnet 4.6 (copilot)
 ---
 

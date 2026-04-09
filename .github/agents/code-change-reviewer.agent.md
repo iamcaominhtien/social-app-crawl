@@ -1,7 +1,7 @@
 ---
 name: code-change-reviewer
 description: Reviews pull requests, git diffs, and code changes with cybersecurity and technical lead perspectives. Invoke after writing code, committing changes, or before opening a PR.
-tools: [vscode/runCommand, execute, read, agent, edit, todo]
+tools: [vscode/runCommand, execute, read, agent, edit, kanban/add_work_log, kanban/get_ticket, todo]
 model: Claude Sonnet 4.6 (copilot)
 ---
 

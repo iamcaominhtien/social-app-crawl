@@ -9,7 +9,7 @@ description: >
   'break this into tickets', 'analyze this requirement', 'update the docs', 'manage the backlog',
   'prioritize', 'estimate stories', 'draw a flow', 'create tickets'.
 argument-hint: "Describe the task — e.g. 'plan this feature', 'write a status report for X', 'break this epic into tickets', 'run a project health check'."
-tools: [vscode/askQuestions, read, agent, 'memory/*', 'playwright/*', todo]
+tools: [vscode/askQuestions, read, agent, kanban/add_work_log, kanban/get_ticket, 'memory/*', 'playwright/*', todo]
 model: Claude Sonnet 4.6 (copilot)
 ---
 
@@ -67,9 +67,10 @@ Before delegating any task, consult this roster to assign the right agent.
 - **One task per agent call** — never bundle unrelated tasks into one prompt
 - **Review before proceeding** — after each delegation, evaluate the output against acceptance criteria before starting the next task
 - **Always get user approval** before delegating a sequence of tasks; do not auto-chain
+- **Provide ticket context** — when delegating to any agent, always include the Kanban ticket ID and title so the agent can self-log their work upon completion. Sub-agents (developer, qc, code-change-reviewer, etc.) are expected to add their own work log entry to the ticket after finishing. Work log timestamps are auto-added — do not instruct agents to include timestamps manually.
 - **2-Phase QC Workflow** — preparation and execution are separate.
-    1. **Phase 1 (Write):** Delegate to `qc` to write complete test cases first. Review and get user confirmation.
-    2. **Phase 2 (Execute):** Only after confirmation, delegate to `qc` to run tests and update results (pass/fail/notes).
+    1. **Phase 1 (Write):** Delegate to `qc` to write complete test cases first. The `qc` agent must add test cases to the Kanban ticket using the Kanban test case tool, in addition to creating the doc. Review and get user confirmation.
+    2. **Phase 2 (Execute):** Only after confirmation, delegate to `qc` to run tests and update results (pass/fail/notes). The `qc` agent must update test case status on the Kanban ticket using the Kanban test case tool, in addition to updating the doc.
     3. **Test Documentation:** The `qc` agent produces test plan markdown files but cannot commit to git. You must instruct the `developer` to include these QC test docs in their PR branch before merging.
 
 ### Subtask rules
@@ -114,7 +115,7 @@ Always follow this process before sending work to another agent:
 
 5. **Management review** — when output comes back, evaluate against requirements (not code quality). Ask: does this meet the goal?
 6. **Iterate** — if not satisfied, give specific feedback and request a revision. Repeat until approved.
-7. **Close** — before closing a ticket: (1) tick every Acceptance Criteria item via the Kanban AC tool to reflect QC-verified results, (2) then mark the ticket as done, (3) log work on the Kanban ticket, (4) update memory if needed. Never close a ticket without ticking its AC items first.
+7. **Close** — before closing a ticket: (1) verify each Acceptance Criteria item is genuinely satisfied (confirmed by QC results) — only tick items that have actually passed, never tick for the sake of completing; (2) then mark the ticket as done; (3) log work on the Kanban ticket using the built-in work log tool (timestamp is auto-added, do not include it manually); (4) update memory if needed. Never close a ticket without all AC items verified and ticked first.
 8. **Cleanup** — after every completed ticket, delegate to `errand-boy` to clean up the environment:
    - Delete any temporary QC test files left outside `docs/test-plans/` (e.g. `docs/test-T0.md`, `docs/test-*.md` in the root docs folder)
    - Confirm local feature branch is deleted (already done by squash merge + `--delete-branch`)

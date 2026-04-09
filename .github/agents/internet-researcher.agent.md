@@ -2,7 +2,7 @@
 name: internet-researcher
 description: "Deep internet researcher. Use when: researching topics from scientific papers, official docs, blogs, forums. Triggers: 'research this', 'find papers on', 'investigate', 'what does the community say about', 'look up', 'summarize findings', 'fact-check', 'cross-check'."
 argument-hint: "Describe what you want researched. Be specific: topic, depth (quick overview vs. deep dive), and preferred source types (papers, docs, blogs, etc.)."
-tools: [read, search, web, todo]
+tools: [read, search, web, kanban/add_work_log, kanban/get_ticket, todo]
 model: Claude Sonnet 4.6 (copilot)
 ---
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -11,14 +12,19 @@ class JsonStore(StorageBackend):
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _resolve(self, key: str) -> Path:
-        return self.base_path / f"{key}.json"
+        path = (self.base_path / f"{key}.json").resolve()
+        if not path.is_relative_to(self.base_path.resolve()):
+            raise ValueError(f"Invalid storage key: {key!r}")
+        return path
 
     async def save(self, key: str, data: Any) -> None:
         path = self._resolve(key)
-        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        content = json.dumps(data, indent=2, default=str)
+        await asyncio.to_thread(path.write_text, content, "utf-8")
 
     async def load(self, key: str) -> Any:
         path = self._resolve(key)
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        text = await asyncio.to_thread(path.read_text, "utf-8")
+        return json.loads(text)

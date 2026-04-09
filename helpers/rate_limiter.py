@@ -6,6 +6,8 @@ class RateLimiter:
     """Async token bucket rate limiter."""
 
     def __init__(self, rate: float, capacity: float | None = None):
+        if rate <= 0:
+            raise ValueError("rate must be positive")
         self.rate = rate  # tokens added per second
         self.capacity = capacity or rate
         self._tokens = self.capacity
@@ -22,6 +24,7 @@ class RateLimiter:
             if self._tokens < tokens:
                 wait = (tokens - self._tokens) / self.rate
                 await asyncio.sleep(wait)
+                self._last_refill = time.monotonic()
                 self._tokens = 0.0
             else:
                 self._tokens -= tokens

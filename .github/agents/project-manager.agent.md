@@ -99,7 +99,7 @@ Always follow this process before sending work to another agent:
 
 **Before delegating to any builder agent (developer, errand-boy, etc.):**
 - Update or create the relevant doc (BA spec, architecture doc) via `knowledge-keeper` if the change affects documented specs
-- Create or update the Kanban ticket via `kanbander` to track the work
+- Create or update the Kanban ticket via `kanbander` to track the work. **Mandatory: Every ticket MUST include Acceptance Criteria (AC).** Always use the dedicated Kanban AC tool/field to set AC — never embed them as markdown text inside the ticket description body. Never create a ticket without AC — this is a hard rule.
 - Only then delegate implementation
 - Always instruct the developer to **create a PR** after pushing the branch — never merge directly to main
 

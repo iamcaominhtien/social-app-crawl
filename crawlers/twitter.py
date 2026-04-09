@@ -226,7 +226,7 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                 return []
 
             stall_count = 0
-            max_stalls = 5  # stop after 5 consecutive scrolls with no new posts
+            max_stalls = 10  # stop after 10 consecutive scrolls with no new posts
 
             while stall_count < max_stalls:
                 items: list[dict[str, Any]] = await _extract_articles(page, account)
@@ -246,14 +246,21 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
                 if new_count == 0:
                     stall_count += 1
+                    # On stall: wait longer and scroll a bit to nudge X's lazy loader
+                    await page.evaluate("window.scrollBy(0, window.innerHeight)")
+                    await page.wait_for_timeout(2000)
                 else:
                     stall_count = 0
 
                 if limit is not None and len(raw_items) >= limit:
                     break
 
-                # Scroll down; rate limiter handles timing between scroll actions
-                await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+                # Scroll down and wait for network to settle before next extraction
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 3)")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass  # timeout is fine — just means no pending requests
                 await self.rate_limiter.acquire()
 
             await browser.close()

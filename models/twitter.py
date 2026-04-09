@@ -11,7 +11,7 @@ class PostType(str, Enum):
 
 
 class TwitterPost(BaseModel):
-    post_id: str
+    post_id: Optional[str] = None
     post_type: PostType
     author_username: str
     author_display_name: str

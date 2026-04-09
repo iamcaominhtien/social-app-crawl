@@ -1,6 +1,5 @@
 """Twitter / X profile crawler using Playwright async API."""
 
-import asyncio
 import json
 import logging
 import re
@@ -14,6 +13,10 @@ from helpers.rate_limiter import RateLimiter
 from models.twitter import PostType, TwitterPost
 
 logger = logging.getLogger(__name__)
+
+
+class LoginWallError(RuntimeError):
+    """Raised when X redirects to the login page instead of showing the profile."""
 
 
 def _parse_count(text: str | None) -> int | None:
@@ -33,10 +36,10 @@ def _parse_count(text: str | None) -> int | None:
         return None
 
 
-def _extract_post_id(url: str) -> str:
-    """Pull the numeric status ID from a tweet URL."""
+def _extract_post_id(url: str) -> str | None:
+    """Pull the numeric status ID from a tweet URL. Returns None if not found."""
     match = re.search(r"/status/(\d+)", url or "")
-    return match.group(1) if match else url
+    return match.group(1) if match else None
 
 
 def _parse_username(url: str | None) -> str:
@@ -47,24 +50,41 @@ def _parse_username(url: str | None) -> str:
     return match.group(1) if match else ""
 
 
-async def _extract_articles(page: Any) -> list[dict[str, Any]]:
+async def _get_button_count(article: Any, testid: str) -> str | None:
+    """Get the counter text from a specific action button by its data-testid."""
+    el = await article.query_selector(
+        f'[data-testid="{testid}"] [data-testid="app-text-transition-container"]'
+    )
+    if el:
+        return (await el.inner_text()).strip()
+    return None
+
+
+async def _extract_articles(page: Any, account: str) -> list[dict[str, Any]]:
     """Extract all tweet articles from the current page using Playwright Python API."""
     articles = await page.query_selector_all('article[data-testid="tweet"]')
     results = []
 
     for article in articles:
-        # Social context (Pinned / reposted)
-        social_el = await article.query_selector('[data-testid="socialContext"]')
-        social_text = (await social_el.inner_text()).strip() if social_el else ""
-        is_repost = "repost" in social_text.lower()
-
-        # Author name / handle
+        # Author name / handle — extract first so we can detect reposts structurally
         user_name_el = await article.query_selector('[data-testid="User-Name"]')
         user_name_text = (await user_name_el.inner_text()).strip() if user_name_el else ""
         # Typical format: "Display Name\n@handle\n·\nDate"
-        lines = [l.strip() for l in re.split(r"[\n·]+", user_name_text) if l.strip()]
-        display_name = lines[0] if lines else ""
-        handle = next((l.lstrip("@") for l in lines if l.startswith("@")), "")
+        parts = [p.strip() for p in re.split(r"[\n·]+", user_name_text) if p.strip()]
+        display_name = parts[0] if parts else ""
+        handle = next((p.lstrip("@") for p in parts if p.startswith("@")), "")
+
+        # Repost detection: structural — if the article author differs from the crawled
+        # account, the post was created by someone else (i.e. a repost). This is
+        # locale-independent and does not rely on translated "reposted" text.
+        social_el = await article.query_selector('[data-testid="socialContext"]')
+        if handle:
+            is_repost = handle.lower() != account.lower()
+        else:
+            # Fallback when handle could not be parsed: a non-empty socialContext
+            # indicates a repost or pinned notice.
+            social_text = (await social_el.inner_text()).strip() if social_el else ""
+            is_repost = bool(social_text)
 
         # Tweet text
         text_el = await article.query_selector('[data-testid="tweetText"]')
@@ -73,46 +93,48 @@ async def _extract_articles(page: Any) -> list[dict[str, Any]]:
         # Time + post URL
         time_el = await article.query_selector("time")
         dt = await time_el.get_attribute("datetime") if time_el else None
-        time_link_el = await time_el.evaluate_handle("el => el.closest('a')") if time_el else None
-        post_url = None
-        if time_link_el:
-            try:
-                post_url = await time_link_el.get_attribute("href")
-                if post_url and not post_url.startswith("http"):
-                    post_url = "https://x.com" + post_url
-            except Exception:
-                pass
 
-        # Engagement counters (reply, retweet, like, views — in DOM order)
-        counter_els = await article.query_selector_all('[data-testid="app-text-transition-container"]')
-        counters = []
-        for cel in counter_els:
-            txt = (await cel.inner_text()).strip()
-            counters.append(txt)
+        post_url = None
+        if time_el:
+            time_link_el = await time_el.evaluate_handle("el => el.closest('a')")
+            if time_link_el:
+                try:
+                    post_url = await time_link_el.get_attribute("href")
+                    if post_url and not post_url.startswith("http"):
+                        post_url = f"https://x.com{post_url}"
+                except Exception:
+                    pass
+
+        # Engagement counters — identified by button data-testid to avoid fragile
+        # positional ordering that breaks when X changes its DOM structure.
+        replies_text = await _get_button_count(article, "reply")
+        retweets_text = await _get_button_count(article, "retweet")
+        likes_text = await _get_button_count(article, "like")
+        views_el = await article.query_selector(
+            '[data-testid="analyticsButton"] [data-testid="app-text-transition-container"]'
+        )
+        views_text = (await views_el.inner_text()).strip() if views_el else None
 
         # Media URLs
         photo_els = await article.query_selector_all('[data-testid="tweetPhoto"] img')
         video_els = await article.query_selector_all("video source")
-        media_urls = []
-        for img in photo_els:
-            src = await img.get_attribute("src")
-            if src:
-                media_urls.append(src)
-        for vid in video_els:
-            src = await vid.get_attribute("src")
-            if src:
-                media_urls.append(src)
+
+        photo_urls = [await img.get_attribute("src") for img in photo_els]
+        video_urls = [await vid.get_attribute("src") for vid in video_els]
+        media_urls = [url for url in photo_urls + video_urls if url]
 
         results.append({
-            "socialContext": social_text,
-            "isRepost": is_repost,
-            "displayName": display_name,
+            "is_repost": is_repost,
+            "display_name": display_name,
             "handle": handle,
             "datetime": dt,
-            "postUrl": post_url,
+            "post_url": post_url,
             "content": content,
-            "counters": counters,
-            "mediaUrls": media_urls,
+            "replies_text": replies_text,
+            "retweets_text": retweets_text,
+            "likes_text": likes_text,
+            "views_text": views_text,
+            "media_urls": media_urls,
         })
 
     return results
@@ -124,17 +146,25 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
     def __init__(self, rate_limiter: RateLimiter | None = None) -> None:
         super().__init__(rate_limiter or RateLimiter(rate=0.5))  # ~1 action per 2s
 
-    async def crawl(self, account: str, output_path: str | None = None, **kwargs) -> list[TwitterPost]:  # type: ignore[override]
+    async def crawl(self, **kwargs: Any) -> list[TwitterPost]:
         """
         Scroll through the full timeline of *account* and return all posts.
 
-        Args:
+        Kwargs:
             account: Twitter/X username (without @).
             output_path: If provided, save JSON to this path.
+            limit: Max number of posts to collect (None = no limit).
+
+        Raises:
+            LoginWallError: If X shows a login wall instead of the profile.
         """
+        account: str = str(kwargs.get("account", ""))
+        output_path: str | None = kwargs.get("output_path")
+        limit: int | None = kwargs.get("limit")
         url = f"https://x.com/{account}"
         raw_items: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
+
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
@@ -154,8 +184,21 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
             except Exception as exc:
                 logger.warning("Navigation error (continuing): %s", exc)
 
-            # Dismiss cookie/login banners if present
-            await asyncio.sleep(2)
+            # Wait for page to settle before inspecting its state
+            await self.rate_limiter.acquire()
+
+            # Detect login wall: check both URL redirect and login form presence.
+            # This is locale-independent — does not rely on translated page text.
+            current_url = page.url
+            login_form = await page.query_selector(
+                '[data-testid="LoginForm"], [data-testid="login"]'
+            )
+            if "login" in current_url or login_form is not None:
+                await browser.close()
+                raise LoginWallError(
+                    f"X requires login to view @{account}. "
+                    "Try setting X_COOKIES in your .env file and loading them into the browser context."
+                )
 
             # Check for suspension or empty profile
             page_text = await page.inner_text("body")
@@ -165,21 +208,21 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                 return []
 
             stall_count = 0
-            max_stalls = 5  # stop if 5 consecutive scrolls yield nothing new
+            max_stalls = 5  # stop after 5 consecutive scrolls with no new posts
 
             while stall_count < max_stalls:
-                await self.rate_limiter.acquire()
-
-                items: list[dict] = await _extract_articles(page)
+                items: list[dict[str, Any]] = await _extract_articles(page, account)
 
                 new_count = 0
                 for item in items:
-                    key = item.get("postUrl") or item.get("content", "")[:80]
+                    key = item.get("post_url") or item.get("content", "")[:80]
                     if key and key not in seen_urls:
                         seen_urls.add(key)
                         item["_crawled_account"] = account
                         raw_items.append(item)
                         new_count += 1
+                        if limit is not None and len(raw_items) >= limit:
+                            break
 
                 logger.info("Scroll: +%d new (total %d)", new_count, len(raw_items))
 
@@ -188,55 +231,59 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                 else:
                     stall_count = 0
 
-                # Scroll down
+                if limit is not None and len(raw_items) >= limit:
+                    break
+
+                # Scroll down; rate limiter handles timing between scroll actions
                 await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-                await asyncio.sleep(1.5)
+                await self.rate_limiter.acquire()
 
             await browser.close()
 
         posts = [self.normalize(r) for r in raw_items]
+        # Drop any posts where a valid numeric post_id could not be extracted
+        posts = [p for p in posts if p.post_id is not None]
 
         if output_path:
             self._save_json(posts, output_path)
 
         return posts
 
-    def normalize(self, raw: dict[str, Any]) -> TwitterPost:  # type: ignore[override]
+    def normalize(self, raw: dict[str, Any]) -> TwitterPost:
         account = raw.get("_crawled_account", "")
-        is_repost = raw.get("isRepost", False)
-        post_url = raw.get("postUrl") or ""
-        post_id = _extract_post_id(post_url)
+        is_repost = raw.get("is_repost", False)
+        post_url = raw.get("post_url") or ""
 
-        # Counters: [reply, retweet, like, views]
-        counters: list[str] = raw.get("counters", [])
+        replies = _parse_count(raw.get("replies_text"))
+        retweets = _parse_count(raw.get("retweets_text"))
+        likes = _parse_count(raw.get("likes_text"))
+        views = _parse_count(raw.get("views_text"))
 
+        orig_handle = orig_display = None
         if is_repost:
-            # Card shows the original author; profile owner is the reposter
-            original_handle = raw.get("handle", "")
-            original_display = raw.get("displayName", "")
-            author_username = account
-            author_display = account
+            # For reposts the crawled account is the reposter; the article shows the original author
+            author_username = author_display = account
+            orig_handle = raw.get("handle")
+            orig_display = raw.get("display_name")
         else:
-            original_handle = None
-            original_display = None
-            author_username = raw.get("handle", "") or account
-            author_display = raw.get("displayName", "") or account
+            author_username = raw.get("handle") or account
+            author_display = raw.get("display_name") or account
 
         return TwitterPost(
-            post_id=post_id,
+            post_id=_extract_post_id(post_url),
             post_type=PostType.repost if is_repost else PostType.original,
             author_username=author_username,
             author_display_name=author_display,
             date=raw.get("datetime"),
             content=raw.get("content", ""),
-            media_urls=raw.get("mediaUrls", []),
-            replies=_parse_count(counters[0]) if len(counters) > 0 else None,
-            retweets=_parse_count(counters[1]) if len(counters) > 1 else None,
-            likes=_parse_count(counters[2]) if len(counters) > 2 else None,
-            views=_parse_count(counters[3]) if len(counters) > 3 else None,
+            media_urls=raw.get("media_urls", []),
+            replies=replies,
+            retweets=retweets,
+            likes=likes,
+            views=views,
             post_url=post_url,
-            original_author_username=original_handle,
-            original_author_display_name=original_display,
+            original_author_username=orig_handle,
+            original_author_display_name=orig_display,
         )
 
     @staticmethod

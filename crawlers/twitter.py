@@ -99,6 +99,47 @@ def _parse_response(data: dict) -> tuple[list[dict], str | None]:
                 cursor = entry.get("content", {}).get("value")
                 continue
 
+            # Replies in UserTweetsAndReplies come as profile-conversation entries
+            # containing an items array of tweets in the thread.
+            if "profile-conversation-" in entry_id:
+                for item in entry.get("content", {}).get("items", []):
+                    item_content = item.get("item", {}).get("itemContent", {})
+                    result = item_content.get("tweet_results", {}).get("result", {})
+                    if not result:
+                        continue
+                    if result.get("__typename") == "TweetWithVisibilityResults":
+                        result = result.get("tweet", {})
+                    legacy = result.get("legacy", {})
+                    if not legacy:
+                        continue
+                    core = result.get("core", {})
+                    author_legacy = (
+                        core.get("user_results", {})
+                        .get("result", {})
+                        .get("legacy", {})
+                    )
+                    legacy["_author"] = author_legacy
+                    views_count = result.get("views", {}).get("count")
+                    legacy["_views"] = int(views_count) if views_count else None
+                    rt_result = legacy.get("retweeted_status_result", {})
+                    if rt_result:
+                        legacy["_is_repost"] = True
+                        rt_inner = rt_result.get("result", {})
+                        if rt_inner.get("__typename") == "TweetWithVisibilityResults":
+                            rt_inner = rt_inner.get("tweet", {})
+                        rt_author = (
+                            rt_inner.get("core", {})
+                            .get("user_results", {})
+                            .get("result", {})
+                            .get("legacy", {})
+                        )
+                        legacy["_original_author"] = rt_author
+                    else:
+                        legacy["_is_repost"] = False
+                        legacy["_original_author"] = {}
+                    tweets.append(legacy)
+                continue
+
             if entry_id.startswith("tweet-"):
                 result = (
                     entry.get("content", {})
@@ -149,11 +190,12 @@ def _parse_response(data: dict) -> tuple[list[dict], str | None]:
     return tweets, cursor
 
 
-def _build_headers(ct0: str) -> dict[str, str]:
+def _build_headers(ct0: str, cookie_override: str | None = None) -> dict[str, str]:
     auth_token = os.getenv("X_AUTH_TOKEN", "")
+    cookie = cookie_override or f"ct0={ct0}; auth_token={auth_token}"
     return {
         "authorization": f"Bearer {_BEARER_TOKEN}",
-        "cookie": f"ct0={ct0}; auth_token={auth_token}",
+        "cookie": cookie,
         "x-csrf-token": ct0,
         "x-twitter-active-user": "yes",
         "x-twitter-auth-type": "OAuth2Session",
@@ -172,26 +214,38 @@ async def _fetch_page(
     user_id: str,
     ct0: str,
     cursor: str | None = None,
+    endpoint_name: str = "UserTweetsAndReplies",
+    features_json: str | None = None,
+    api_base_url: str = "https://api.x.com/graphql/",
+    variables_template: dict | None = None,
+    cookie_override: str | None = None,
 ) -> tuple[list[dict], str | None]:
-    """Single paginated httpx call to the UserTweets GraphQL endpoint."""
-    variables: dict[str, Any] = {
-        "userId": user_id,
-        "count": 40,
-        "includePromotedContent": True,
-        "withQuickPromoteEligibilityTweetFields": True,
-        "withVoice": True,
-        "withV2Timeline": True,
-    }
+    """Single paginated httpx call to a UserTweets* GraphQL endpoint."""
+    if variables_template:
+        variables = dict(variables_template)
+        variables["count"] = 40
+    else:
+        variables = {
+            "userId": user_id,
+            "count": 40,
+            "includePromotedContent": True,
+            "withQuickPromoteEligibilityTweetFields": True,
+            "withVoice": True,
+            "withV2Timeline": True,
+        }
     if cursor:
         variables["cursor"] = cursor
+    else:
+        variables.pop("cursor", None)
 
     params = {
         "variables": json.dumps(variables, separators=(",", ":")),
-        "features": json.dumps(_FEATURES, separators=(",", ":")),
+        "features": features_json or json.dumps(_FEATURES, separators=(",", ":")),
+        "fieldToggles": json.dumps({"withArticlePlainText": False}, separators=(",", ":")),
     }
 
-    url = f"https://api.x.com/graphql/{op_id}/UserTweets"
-    response = await client.get(url, params=params, headers=_build_headers(ct0))
+    url = f"{api_base_url}{op_id}/{endpoint_name}"
+    response = await client.get(url, params=params, headers=_build_headers(ct0, cookie_override))
     response.raise_for_status()
     return _parse_response(response.json())
 
@@ -227,14 +281,13 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
         # ------------------------------------------------------------------ #
         # Phase 1: Playwright bootstrap
-        #   - Navigate to profile (injects cookies → stays logged in)
-        #   - Intercept first UserTweets GraphQL response to obtain:
-        #       op_id, user_id, first batch of tweets, first cursor
+        #   - Navigate to /with_replies (triggers UserTweetsAndReplies)
+        #   - Intercept first response to extract op_id, user_id, first batch
         # ------------------------------------------------------------------ #
         op_id: str | None = None
         user_id: str | None = None
+        endpoint_name: str = "UserTweetsAndReplies"
         bootstrap_tweets: list[dict] = []
-        bootstrap_cursor: str | None = None
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
@@ -262,9 +315,8 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                     {"name": "ct0", "value": ct0, "domain": ".x.com", "path": "/"},
                 ])
 
-            logger.info("Navigating to https://x.com/%s (Playwright bootstrap)", account)
+            logger.info("Navigating to https://x.com/%s/with_replies (Playwright bootstrap)", account)
 
-            # Capture all graphql response URLs for debugging
             seen_graphql_urls: list[str] = []
 
             async def _log_graphql(response: Any) -> None:
@@ -273,16 +325,14 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
             page.on("response", _log_graphql)
 
-            # Use expect_response context manager — reliable way to wait for a
-            # specific response within a navigation action.
             try:
                 async with page.expect_response(
-                    lambda r: "UserTweets" in r.url,
+                    lambda r: "UserTweetsAndReplies" in r.url or "UserTweets" in r.url,
                     timeout=30_000,
                 ) as resp_info:
                     try:
                         await page.goto(
-                            f"https://x.com/{account}",
+                            f"https://x.com/{account}/with_replies",
                             wait_until="domcontentloaded",
                             timeout=30_000,
                         )
@@ -291,13 +341,13 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
                 resp = await resp_info.value
                 data = await resp.json()
-                tweets, cursor_val = _parse_response(data)
+                tweets, _ = _parse_response(data)
 
                 parts = resp.url.split("/graphql/")
                 if len(parts) == 2:
                     op_id = parts[1].split("/")[0]
+                    endpoint_name = parts[1].split("/")[1].split("?")[0]
 
-                # Try response body first, then fall back to request URL variables
                 uid = (
                     data.get("data", {})
                     .get("user", {})
@@ -310,15 +360,13 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                     user_id = uid
 
                 bootstrap_tweets = tweets
-                bootstrap_cursor = cursor_val
-                logger.info("Intercepted UserTweets response: %s", resp.url)
+                logger.info("Intercepted %s response: op_id=%s user_id=%s", endpoint_name, op_id, user_id)
 
             except Exception as exc:
                 logger.warning("expect_response failed: %s", exc)
-                # Fallback: navigate, then scroll and wait for the response
                 try:
                     await page.goto(
-                        f"https://x.com/{account}",
+                        f"https://x.com/{account}/with_replies",
                         wait_until="domcontentloaded",
                         timeout=30_000,
                     )
@@ -329,7 +377,7 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                 captured_url: list[str] = []
 
                 async def _capture(response: Any) -> None:
-                    if "UserTweets" in response.url and not captured:
+                    if ("UserTweetsAndReplies" in response.url or "UserTweets" in response.url) and not captured:
                         try:
                             body = await response.text()
                             import json as _json
@@ -339,16 +387,16 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                             pass
 
                 page.on("response", _capture)
-                # Scroll to trigger the timeline request
                 await page.evaluate("window.scrollBy(0, 600)")
                 await page.wait_for_timeout(8_000)
 
                 if captured:
                     data = captured[0]
-                    tweets, cursor_val = _parse_response(data)
+                    tweets, _ = _parse_response(data)
                     parts = captured_url[0].split("/graphql/")
                     if len(parts) == 2:
                         op_id = parts[1].split("/")[0]
+                        endpoint_name = parts[1].split("/")[1].split("?")[0]
                     uid = (
                         data.get("data", {})
                         .get("user", {})
@@ -358,10 +406,9 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                     if uid:
                         user_id = uid
                     bootstrap_tweets = tweets
-                    bootstrap_cursor = cursor_val
                 else:
                     logger.error(
-                        "No UserTweets intercepted. Seen graphql URLs: %s",
+                        "No UserTweetsAndReplies/UserTweets intercepted. Seen graphql URLs: %s",
                         seen_graphql_urls[:10],
                     )
 
@@ -378,52 +425,59 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                     "(export from browser DevTools → Application → Cookies → x.com)"
                 )
 
-            await browser.close()
+            if not op_id or not user_id:
+                await browser.close()
+                raise RuntimeError(
+                    "Failed to extract UserTweetsAndReplies operation ID or user ID from "
+                    "Playwright intercept. Check your cookies in .env."
+                )
 
-        if not op_id or not user_id:
-            raise RuntimeError(
-                "Failed to extract UserTweets operation ID or user ID from Playwright intercept. "
-                "Check your cookies in .env."
+            logger.info(
+                "Bootstrap complete — endpoint=%s op_id=%s user_id=%s tweets_in_first_batch=%d",
+                endpoint_name,
+                op_id,
+                user_id,
+                len(bootstrap_tweets),
             )
 
-        logger.info(
-            "Bootstrap complete — op_id=%s user_id=%s tweets_in_first_batch=%d",
-            op_id,
-            user_id,
-            len(bootstrap_tweets),
-        )
+            # ------------------------------------------------------------------ #
+            # Phase 2: scroll-based interception
+            # Scroll the page to trigger X's infinite-scroll; intercept each new
+            # UserTweetsAndReplies response via a queue. This avoids all manual
+            # HTTP calls, which fail due to X's bot/TLS fingerprinting.
+            # ------------------------------------------------------------------ #
+            all_raw: list[dict] = list(bootstrap_tweets)
+            seen_ids: set[str] = {t.get("id_str", "") for t in bootstrap_tweets}
 
-        # ------------------------------------------------------------------ #
-        # Phase 2: httpx cursor pagination
-        # ------------------------------------------------------------------ #
-        all_raw: list[dict] = list(bootstrap_tweets)
-        cursor = bootstrap_cursor
-        seen_ids: set[str] = {t.get("id_str", "") for t in bootstrap_tweets}
+            response_queue: asyncio.Queue = asyncio.Queue()
 
-        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            async def _enqueue_timeline(response: Any) -> None:
+                if "UserTweetsAndReplies" in response.url or "UserTweets" in response.url:
+                    try:
+                        body_data = await response.json()
+                        await response_queue.put(body_data)
+                    except Exception:
+                        pass
+
+            page.on("response", _enqueue_timeline)
+
+            consecutive_empty = 0
             page_num = 1
-            while cursor and len(all_raw) < effective_limit:
+
+            while len(all_raw) < effective_limit:
                 await self.rate_limiter.acquire()
                 logger.info(
-                    "Fetching page %d (cursor=%.30s…) — collected %d so far",
-                    page_num,
-                    cursor,
-                    len(all_raw),
+                    "Scroll %d — collected %d so far", page_num, len(all_raw)
                 )
-                try:
-                    tweets, next_cursor = await _fetch_page(
-                        http_client, op_id, user_id, ct0, cursor
-                    )
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 429:
-                        logger.warning("Rate limited (429) — waiting 60s then retrying once")
-                        await asyncio.sleep(60)
-                        tweets, next_cursor = await _fetch_page(
-                            http_client, op_id, user_id, ct0, cursor
-                        )
-                    else:
-                        raise
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
+                try:
+                    body_data = await asyncio.wait_for(response_queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.info("No new timeline response after scroll — stopping")
+                    break
+
+                tweets, _ = _parse_response(body_data)
                 new_count = 0
                 for tweet in tweets:
                     tid = tweet.get("id_str", "")
@@ -432,21 +486,26 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                         all_raw.append(tweet)
                         new_count += 1
 
-                logger.info(
-                    "Page %d: +%d new tweets (total %d)", page_num, new_count, len(all_raw)
-                )
+                logger.info("Scroll %d: +%d new tweets (total %d)", page_num, new_count, len(all_raw))
 
-                if not new_count or next_cursor == cursor:
-                    logger.info("No new tweets returned — stopping pagination")
-                    break
+                if new_count == 0:
+                    consecutive_empty += 1
+                    if consecutive_empty >= 3:
+                        logger.info("No new tweets after 3 consecutive scrolls — stopping")
+                        break
+                else:
+                    consecutive_empty = 0
 
-                cursor = next_cursor
                 page_num += 1
+
+            await browser.close()
 
         logger.info("Crawl complete — %d raw tweets fetched for @%s", len(all_raw), account)
 
         posts = [self.normalize(r, crawled_account=account) for r in all_raw]
         posts = [p for p in posts if p.post_id is not None]
+        # Drop tweets from other users that appeared as thread context
+        posts = [p for p in posts if p.author_username.lower() == account.lower()]
 
         if output_path:
             self._save_json(posts, output_path)
@@ -463,9 +522,20 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
         orig_handle: str | None = None
         orig_display: str | None = None
+        reply_to: str | None = None
+
         if is_repost:
             orig_handle = original_author.get("screen_name")
             orig_display = original_author.get("name")
+        else:
+            reply_to = raw.get("in_reply_to_screen_name") or None
+
+        if is_repost:
+            post_type = PostType.repost
+        elif reply_to:
+            post_type = PostType.reply
+        else:
+            post_type = PostType.original
 
         id_str = raw.get("id_str")
         post_url = (
@@ -484,7 +554,7 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
         return TwitterPost(
             post_id=id_str,
-            post_type=PostType.repost if is_repost else PostType.original,
+            post_type=post_type,
             author_username=author_username,
             author_display_name=author_display_name,
             date=date_str,
@@ -497,6 +567,7 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
             post_url=post_url,
             original_author_username=orig_handle,
             original_author_display_name=orig_display,
+            reply_to=reply_to,
         )
 
     @staticmethod

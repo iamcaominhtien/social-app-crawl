@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class PostType(str, Enum):
     original = "original"
     repost = "repost"
+    reply = "reply"
 
 
 class TwitterPost(BaseModel):
@@ -26,3 +27,5 @@ class TwitterPost(BaseModel):
     # Populated only when post_type == "repost"
     original_author_username: Optional[str] = None
     original_author_display_name: Optional[str] = None
+    # Populated only when post_type == "reply"
+    reply_to: Optional[str] = None

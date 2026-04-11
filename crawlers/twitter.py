@@ -7,75 +7,30 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 load_dotenv()
 
-from crawlers.base import BaseCrawler
-from helpers.rate_limiter import RateLimiter
-from models.twitter import PostType, TwitterPost
+from crawlers.base import BaseCrawler  # noqa: E402
+from helpers.rate_limiter import RateLimiter  # noqa: E402
+from models.twitter import PostType, TwitterPost  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Public bearer token — same across all X web clients, not a secret.
-_BEARER_TOKEN = (
-    "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D"
-    "1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-)
-
-# Features captured from live browser request (April 2026).
-_FEATURES: dict[str, bool] = {
-    "rweb_video_screen_enabled": False,
-    "profile_label_improvements_pcf_label_in_post_enabled": True,
-    "responsive_web_profile_redirect_enabled": False,
-    "rweb_tipjar_consumption_enabled": False,
-    "verified_phone_label_enabled": False,
-    "creator_subscriptions_tweet_preview_api_enabled": True,
-    "responsive_web_graphql_timeline_navigation_enabled": True,
-    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-    "premium_content_api_read_enabled": False,
-    "communities_web_enable_tweet_community_results_fetch": True,
-    "c9s_tweet_anatomy_moderator_badge_enabled": True,
-    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
-    "responsive_web_grok_analyze_post_followups_enabled": True,
-    "responsive_web_jetfuel_frame": True,
-    "responsive_web_grok_share_attachment_enabled": True,
-    "responsive_web_grok_annotations_enabled": True,
-    "articles_preview_enabled": True,
-    "responsive_web_edit_tweet_api_enabled": True,
-    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
-    "view_counts_everywhere_api_enabled": True,
-    "longform_notetweets_consumption_enabled": True,
-    "responsive_web_twitter_article_tweet_consumption_enabled": True,
-    "content_disclosure_indicator_enabled": True,
-    "content_disclosure_ai_generated_indicator_enabled": True,
-    "responsive_web_grok_show_grok_translated_post": True,
-    "responsive_web_grok_analysis_button_from_backend": True,
-    "post_ctas_fetch_enabled": True,
-    "freedom_of_speech_not_reach_fetch_enabled": True,
-    "standardized_nudges_misinfo": True,
-    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
-    "longform_notetweets_rich_text_read_enabled": True,
-    "longform_notetweets_inline_media_enabled": False,
-    "responsive_web_grok_image_annotation_enabled": True,
-    "responsive_web_grok_imagine_annotation_enabled": True,
-    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
-    "responsive_web_enhance_cards_enabled": False,
-}
-
 _TWITTER_DATE_FORMAT = "%a %b %d %H:%M:%S +0000 %Y"
 _MAX_TWEETS = 3_200  # X server-side limit
+
+
 def _extract_user_id_from_url(url: str) -> str | None:
     """Parse the userId from a UserTweets request URL's variables query param."""
-    import json as _json
-    from urllib.parse import parse_qs, urlparse
     try:
         qs = parse_qs(urlparse(url).query)
         variables_str = qs.get("variables", [None])[0]
         if variables_str:
-            return _json.loads(variables_str).get("userId")
+            return json.loads(variables_str).get("userId")
     except Exception:
         pass
     return None
@@ -174,10 +129,6 @@ def _enrich_legacy(legacy: dict, result: dict) -> None:
         legacy["_is_repost"] = False
         legacy["_original_author"] = {}
 
-
-# JavaScript template executed in the Playwright page context via page.evaluate().
-# Uses browser's native fetch so all session cookies and TLS fingerprinting are handled
-# -----------------------------------------------------------------------
 
 class TwitterCrawler(BaseCrawler[TwitterPost]):
     """Crawls all posts from a public X/Twitter profile via GraphQL cursor pagination."""
@@ -377,7 +328,6 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
                     consecutive_empty = 0
 
                 page_num += 1
-                page_num += 1
 
             await browser.close()
 
@@ -393,7 +343,7 @@ class TwitterCrawler(BaseCrawler[TwitterPost]):
 
         return posts
 
-    def normalize(self, raw: dict[str, Any], crawled_account: str = "") -> TwitterPost:  # type: ignore[override]
+    def normalize(self, raw: dict[str, Any], crawled_account: str = "") -> TwitterPost:
         is_repost = raw.get("_is_repost", False)
         author_legacy = raw.get("_author", {})
         original_author = raw.get("_original_author", {})
